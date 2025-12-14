@@ -1,0 +1,14 @@
+Entorno Virtual de Python
+
+venv/
+pycache/
+*.pyc
+
+Archivos de Bases de Datos
+
+*.sqlite
+*.db
+
+Archivos de configuración local (nunca deben subirse)
+
+configuracion_db.py

@@ -1,0 +1,1464 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plataforma de Reserva de Servicios - Completo</title>
+    <!-- Carga de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Configuración de Fuentes y Estilos -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f7;
+        }
+        .container-padding {
+            padding: 2rem 1rem;
+        }
+        @media (min-width: 640px) {
+            .container-padding {
+                padding: 3rem 4rem;
+            }
+        }
+        .dropdown-menu {
+            display: none;
+            right: 0;
+            top: 100%;
+        }
+        .dropdown-button:focus + .dropdown-menu,
+        .group:hover .dropdown-menu {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app" class="min-h-screen">
+        <!-- Contenido principal cargado por JS -->
+    </div>
+
+    <script>
+        // ==========================================================
+        // CONFIGURACIÓN DE CONEXIÓN REAL AL BACKEND DE FLASK
+        // ==========================================================
+        const API_BASE_URL = window.location.origin + '/api'; 
+        
+        async function fetchApi(endpoint, options = {}) {
+            try {
+                const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+                    headers: { 'Content-Type': 'application/json' },
+                    ...options,
+                });
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.message || `Error ${response.status}: Error de servidor.`);
+                }
+                return data;
+            } catch (error) {
+                console.error("API Error:", error);
+                window.Router.showAlert('Error de Conexión', error.message || 'No se pudo conectar al servidor.', 'error');
+                return { success: false, message: error.message };
+            }
+        }
+
+
+        // ==========================================================
+        // MÓDULO 1: ESTADO Y LÓGICA DE NEGOCIO (SRP)
+        // ==========================================================
+
+        const AppState = (function() {
+            let state = {
+                currentView: 'services',
+                isLoggedIn: false,
+                username: 'Usuario Invitado',
+                userId: null,
+                userEmail: null, 
+                userRole: 'Cliente', 
+                isAdmin: false, 
+                isProvider: false, 
+                selectedServiceId: null,
+                filters: { query: '', modality: 'all', maxPrice: 300 },
+                reservations: {}, 
+                services: [], 
+                providerSchedule: {
+                    // Horarios simulados para que getAvailableSlots siempre tenga algo
+                    'prov001': {
+                        'sunday': { start: '09:00', end: '17:00', capacity: 1 },
+                        'monday': { start: '09:00', end: '17:00', capacity: 2 },
+                        'tuesday': { start: '09:00', end: '17:00', capacity: 1 },
+                        'wednesday': { start: '09:00', end: '17:00', capacity: 2 },
+                        'thursday': { start: '09:00', end: '17:00', capacity: 1 },
+                        'friday': { start: '09:00', end: '17:00', capacity: 2 },
+                        'saturday': { start: '09:00', end: '17:00', capacity: 1 },
+                    }
+                },
+                users: [
+                    { id: 'admin_id', email: 'admin@demo.com', role: 'Administrador', name: 'Admin Global', status: 'Activo', registeredDate: '2025-01-01', firstName: 'Admin', lastName: 'Global', identificationId: '0000000000' },
+                    { id: 'prov001', email: 'provider@demo.com', role: 'Proveedor', name: 'Proveedor Demo', status: 'Activo', registeredDate: '2025-02-15', firstName: 'Proveedor', lastName: 'Demo', identificationId: '1111111111' },
+                ],
+            };
+
+            let renderCallback = () => {};
+
+            const setState = (newState) => {
+                state = { ...state, ...newState };
+                renderCallback();
+            };
+
+            // --- LÓGICA: FETCH DE SERVICIOS REALES (Conexión a Flask para Catálogo) ---
+            async function fetchServices() {
+                window.Router.showAlert('Cargando', 'Obteniendo servicios desde PostgreSQL...', 'info');
+                
+                try {
+                    const data = await fetchApi('/services', { method: 'GET' });
+                    
+                    if (Array.isArray(data)) {
+                        setState({ services: data }); 
+                        window.Router.showAlert('Catálogo Listo', `Se cargaron ${data.length} servicios desde la base de datos.`, 'success');
+                    } else {
+                        setState({ services: [] });
+                        window.Router.showAlert('Catálogo Vacío', 'No hay servicios registrados en la base de datos.', 'info');
+                    }
+                } catch (error) {
+                    setState({ services: [] });
+                }
+            }
+            // ------------------------------------------------
+            
+            // --- LÓGICA: FETCH DE HISTORIAL DE RESERVAS (Retornada a MOCK/Stub para estabilidad) ---
+            async function fetchReservations() {
+                const { userId, userRole, isLoggedIn } = state;
+                if (!isLoggedIn || !userId) {
+                    setState({ reservations: {} });
+                    return;
+                }
+
+                window.Router.showAlert('Cargando Historial', 'Obteniendo reservas desde PostgreSQL...', 'info');
+
+                try {
+                    // LLAMADA AL ENDPOINT REAL
+                    const data = await fetchApi(`/history/${userId}/${userRole}`, { method: 'GET' });
+
+                    if (Array.isArray(data)) {
+                        // Transformar la lista para que coincida con la estructura del frontend (camelCase)
+                        const reservationsObject = data.reduce((acc, res) => {
+                            acc[res.id_reserva] = {
+                                id: res.id_reserva,
+                                serviceName: res.tipo_consulta,
+                                slotTime: res.slot_time,
+                                status: res.estado_reserva,
+                                paymentMethod: res.metodo_pago,
+                                paymentStatus: res.estado_pago,
+                                userId: res.user_id, 
+                                username: res.username,
+                                rating: null,
+                            };
+                            return acc;
+                        }, {});
+
+                        setState({ reservations: reservationsObject });
+                        window.Router.showAlert('Historial Cargado', `Tienes ${data.length} reservas registradas.`, 'success');
+                    } else {
+                        setState({ reservations: {} });
+                        window.Router.showAlert('Historial Vacío', data.message || 'No se encontraron reservas.', 'info');
+                    }
+                } catch (error) {
+                    // Si falla el fetch de historial, usamos un MOCK LOCAL para la visualización
+                    const mock = {
+                        'r001': { id: 'r001', serviceName: 'MOCK: Consulta Médica', slotTime: '2025-12-25 10:00:00', paymentMethod: 'Online', status: 'APROBADO', paymentStatus: 'APROBADO', userId: 'admin_id', username: 'Admin Global', timestamp: new Date().toLocaleString(), rating: 4 },
+                    };
+                    
+                    if (state.userRole === 'Administrador' || state.userRole === 'Proveedor') {
+                        // Manager ve la mock
+                        setState({ reservations: mock });
+                    } else {
+                        // Cliente ve lista vacía (o sus propias mocks)
+                        setState({ reservations: {} });
+                    }
+
+                    // No mostrar error en el frontend para no asustar al usuario si es solo un test de UI
+                    console.warn("ADVERTENCIA: Usando datos de historial MOCK local debido a fallo en la lectura de BD.");
+                }
+            }
+            // ------------------------------------------------
+
+            const fetchInitialData = async () => { 
+                await fetchServices();
+                if (state.isLoggedIn) {
+                    await fetchReservations();
+                }
+                renderCallback(); 
+            };
+            
+            const applyFilters = (newFilters) => { setState({ filters: { ...state.filters, ...newFilters } }); };
+            const getFilteredServices = () => { 
+                const { query, modality, maxPrice } = state.filters;
+                return state.services.filter(service => {
+                    const matchesQuery = service.name.toLowerCase().includes(query.toLowerCase()) || 
+                                         service.desc.toLowerCase().includes(query.toLowerCase()) ||
+                                         service.expertName.toLowerCase().includes(query.toLowerCase());
+                    const matchesModality = modality === 'all' || service.modality === modality;
+                    const matchesPrice = service.price <= maxPrice;
+                    return matchesQuery && matchesModality && matchesPrice;
+                });
+            };
+
+            const getServiceById = (id) => state.services.find(s => s.id === id);
+
+            const getAvailableSlots = (serviceId) => {
+                const now = new Date();
+                const today = now.toISOString().split('T')[0];
+                const dayOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][now.getDay()];
+                const slots = [];
+                const service = getServiceById(serviceId);
+                
+                if (!service) return [];
+
+                let schedule = state.providerSchedule[service.providerId]?.[dayOfWeek];
+                
+                if (!schedule) {
+                    schedule = { start: '09:00', end: '17:00', capacity: 1 };
+                }
+
+                const [startHour, startMin] = schedule.start.split(':').map(Number);
+                const [endHour, endMin] = schedule.end.split(':').map(Number);
+                
+                let currentTimestamp = startHour * 60 + startMin;
+                const endTimestamp = endHour * 60 + endMin;
+                
+                while (currentTimestamp < endTimestamp) {
+                    const h = Math.floor(currentTimestamp / 60);
+                    const m = currentTimestamp % 60;
+                    const time = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+                    
+                    if (currentTimestamp + service.duration <= endTimestamp) {
+                        slots.push({ date: today, time: time, isBooked: false, capacity: schedule.capacity }); 
+                    }
+                    
+                    currentTimestamp += service.duration; 
+                }
+                return slots;
+            };
+
+            // CONECTADO: Creación de un nuevo servicio
+            async function addService(name, price, duration, capacity, modality, expertName, desc, imageUrl) {
+                if (!state.isProvider && !state.isAdmin) return window.Router.showAlert('Error', 'Permiso denegado.', 'error');
+                
+                window.Router.showAlert('Guardando...', 'Creando nuevo servicio en la BD.', 'info');
+
+                const newServiceData = {
+                    providerId: state.isProvider ? state.userId : 'admin_added',
+                    expertName: expertName,
+                    name: name,
+                    price: parseFloat(price),
+                    duration: parseInt(duration),
+                    capacity: parseInt(capacity),
+                    modality: modality,
+                    desc: desc,
+                    image: imageUrl.trim() || 'https://placehold.co/100x100/9400D3/ffffff?text=Service',
+                    category: 'Sin Categoría'
+                };
+
+                const data = await fetchApi('/service', {
+                    method: 'POST',
+                    body: JSON.stringify(newServiceData)
+                });
+                
+                if (data.success) {
+                    window.Router.showAlert('Servicio Añadido', `${name} ha sido agregado al catálogo.`, 'success');
+                    await fetchServices();
+                } else {
+                    window.Router.showAlert('Error', `Fallo al crear servicio: ${data.message}`, 'error');
+                }
+            }
+            
+            // bookSlot CONECTADO (Solo si las inserciones funcionan)
+            async function bookSlot(serviceId, slotTime, paymentMethod) {
+                if (!state.isLoggedIn || !state.userId || !state.userEmail) {
+                    return window.Router.showAlert('Error', 'Debe iniciar sesión para hacer una reserva.', 'error');
+                }
+
+                const service = getServiceById(serviceId);
+                if (!service) {
+                    return window.Router.showAlert('Error', 'Servicio no encontrado.', 'error');
+                }
+                
+                const reservationStatus = 'BLOQUEADO'; 
+                
+                // Paso 1: Crear la Reserva en la BD
+                window.Router.showAlert('Reservando', 'Creando cita y bloqueando espacio...', 'info');
+
+                const reservaData = {
+                    usuarioId: state.userId,
+                    serviceId: serviceId,
+                    slotTime: slotTime,
+                    status: reservationStatus,
+                    userEmail: state.userEmail,
+                    serviceName: service.name 
+                };
+
+                const resData = await fetchApi('/reservation', {
+                    method: 'POST',
+                    body: JSON.stringify(reservaData)
+                });
+                
+                if (!resData.success) {
+                    return window.Router.showAlert('Error de Reserva', resData.message, 'error');
+                }
+
+                const reservationId = resData.reservaId;
+                
+                // Paso 2: Procesar Pago
+                const totalAmount = service.price * 1.15; 
+                window.Router.showAlert('Pagando', 'Procesando pago (simulación)...', 'info');
+                
+                const paymentData = {
+                    reserva_id: reservationId,
+                    monto: totalAmount,
+                    metodo: paymentMethod
+                };
+
+                const payData = await fetchApi('/process_payment', {
+                    method: 'POST',
+                    body: JSON.stringify(paymentData)
+                });
+                
+                if (!payData.success) {
+                    // Si el pago falla, muestra el error del backend
+                    return window.Router.showAlert('Error de Pago', payData.message, 'error');
+                }
+                
+                // Si fue exitoso (ambas inserciones), muestra el éxito.
+                window.Router.showAlert('Reserva Exitosa', `Reserva ${reservationId} completada. Pago: ${payData.estado_pago} (DB actualizado).`, 'success');
+                await fetchReservations(); 
+                window.Router.switchView('reservations');
+            }
+
+
+            const removeService = (serviceId) => { /* ... Lógica simulada por ahora ... */ 
+                window.Router.showAlert('Atención', `Eliminación de servicio ${serviceId} simulada.`, 'info');
+            };
+            
+            const cancelReservation = (reservationId) => { /* ... misma lógica simulada ... */ };
+            const rateReservation = (reservationId, rating) => { /* ... misma lógica simulada ... */ };
+            const updateProviderSchedule = (day, start, end, capacity) => { /* ... misma lógica simulada ... */ };
+            const updateUserProfile = (userId, field, newValue) => { /* ... misma lógica simulada ... */ };
+            // --- FIN Lógica Simulada ---
+
+
+            // =======================================================
+            // LÓGICA DE AUTENTICACIÓN REAL (CONECTADA A FLASK)
+            // =======================================================
+            async function handleLogin(email, password) {
+                if (!email || !password) return window.Router.showAlert('Error', 'Introduce email y contraseña.', 'error');
+                
+                window.Router.showAlert('Conectando', 'Enviando credenciales al servidor...', 'info');
+
+                const data = await fetchApi('/login', {
+                    method: 'POST',
+                    body: JSON.stringify({ email, password })
+                });
+
+                if (data.success) {
+                    setState({
+                        isLoggedIn: true,
+                        username: data.username,
+                        userId: data.userId,
+                        userEmail: data.email,
+                        isAdmin: data.isAdmin, 
+                        isProvider: data.isProvider,
+                        userRole: data.isAdmin ? 'Administrador' : (data.isProvider ? 'Proveedor' : 'Cliente'), 
+                        currentView: data.destinationView 
+                    });
+                    await fetchServices();
+                    await fetchReservations(); 
+                    window.Router.showAlert('¡Bienvenido!', `Inicio de sesión exitoso para ${data.username}. Rol: ${state.userRole}.`, 'success');
+                } else {
+                    window.Router.showAlert('Fallo de Login', data.message || 'Verifica correo y contraseña.', 'error');
+                }
+            }
+
+            // REGLA DE VALIDACIÓN DE CONTRASEÑA EN JS
+            function validatePassword(password) {
+                if (password.length < 8) return "La contraseña debe tener al menos 8 caracteres.";
+                if (!/[A-Z]/.test(password)) return "La contraseña debe contener al menos una letra mayúscula.";
+                if (!/[a-z]/.test(password)) return "La contraseña debe contener al menos una letra minúscula.";
+                if (!/[0-9]/.test(password)) return "La contraseña debe contener al menos un número.";
+                if (!/[@#$%&/!*]/.test(password)) return "La contraseña debe contener al menos un carácter especial (@, #, $, %, &, /, !, *).";
+                return null; 
+            }
+
+            async function handleRegister(email, password, firstName, lastName, identificationId, confirmPassword) {
+                if (!email || !password || !firstName || !lastName || !identificationId || !confirmPassword) return window.Router.showAlert('Error', 'Completa todos los campos.', 'error');
+                if (password !== confirmPassword) return window.Router.showAlert('Error', 'Las contraseñas no coinciden.', 'error');
+
+                const passwordError = validatePassword(password);
+                if (passwordError) return window.Router.showAlert('Error de Seguridad', passwordError, 'error');
+
+                window.Router.showAlert('Conectando', 'Enviando datos de registro al servidor...', 'info');
+
+                const data = await fetchApi('/register', {
+                    method: 'POST',
+                    body: JSON.stringify({ email, password, firstName, lastName, identificationId })
+                });
+
+                if (data.success) {
+                    setState({
+                        isLoggedIn: true,
+                        username: data.username,
+                        userId: data.userId,
+                        userEmail: email,
+                        isAdmin: false,
+                        isProvider: false,
+                        userRole: 'Cliente',
+                        currentView: 'services'
+                    });
+                    window.Router.showAlert('¡Registro Exitoso!', `Cuenta creada para ${data.username}.`, 'success');
+                } else {
+                    window.Router.showAlert('Fallo de Registro', data.message || 'El registro falló.', 'error');
+                }
+            }
+
+            const handleLogout = () => {
+                setState({
+                    isLoggedIn: false,
+                    username: 'Usuario Invitado',
+                    userId: null,
+                    userEmail: null,
+                    isAdmin: false,
+                    isProvider: false,
+                    userRole: 'Cliente',
+                    currentView: 'services'
+                });
+                window.Router.showAlert('Cierre de Sesión', 'Tu sesión se ha cerrado correctamente.', 'info');
+                fetchServices(); 
+            };
+            
+            return {
+                get: () => state,
+                setRenderCallback: (callback) => { renderCallback = callback; },
+                fetchInitialData, 
+                getServiceById,
+                getAvailableSlots,
+                getFilteredServices,
+                applyFilters,
+                bookSlot, 
+                cancelReservation,
+                rateReservation, 
+                addService, 
+                removeService, 
+                updateProviderSchedule,
+                handleLogin, 
+                handleRegister, 
+                handleLogout,
+                updateUserProfile,
+                fetchServices, 
+            };
+        })();
+
+
+        // ==========================================================
+        // MÓDULO 2: VISTAS (PRESENTACIÓN)
+        // ==========================================================
+
+        const Views = {
+
+            Services: {
+                render: () => {
+                    const state = AppState.get();
+                    const filteredServices = AppState.getFilteredServices();
+                    const filters = state.filters;
+
+                    const serviceList = filteredServices.map(service => {
+                        return `
+                            <div class="bg-white p-6 rounded-xl shadow-lg flex flex-col md:flex-row items-center space-y-4 md:space-y-0 md:space-x-6 transition hover:shadow-xl border border-gray-100">
+                                <img src="${service.image}" alt="${service.name}" class="w-24 h-24 rounded-lg object-cover border-2 border-gray-100" onerror="this.onerror=null;this.src='https://placehold.co/100x100/A0B9F0/ffffff?text=Service'">
+                                <div class="flex-grow text-center md:text-left">
+                                    <h3 class="text-xl font-bold text-gray-800">${service.name} (${service.modality})</h3>
+                                    <p class="text-gray-600 text-sm">Experto: <span class="font-semibold">${service.expertName}</span></p>
+                                    <p class="text-gray-600 text-sm">${service.desc}</p>
+                                    <div class="mt-2 text-sm text-gray-500 space-x-3">
+                                        <span>Duración: ${service.duration} min</span>
+                                        <span>Cupo: ${service.capacity}</span>
+                                        <span class="font-semibold text-purple-600">#${service.category}</span>
+                                    </div>
+                                    <p class="text-2xl font-extrabold text-blue-700 mt-2">$${service.price.toFixed(2)}</p>
+                                </div>
+                                
+                                <button onclick="window.Router.switchView('booking_detail', {serviceId: '${service.id}'})"
+                                    class="w-full md:w-auto px-6 py-3 text-white font-semibold rounded-lg bg-green-500 hover:bg-green-600 transform transition duration-150 ease-in-out active:scale-95 shadow-md">
+                                    Ver Horarios y Reservar
+                                </button>
+                            </div>
+                        `;
+                    }).join('');
+
+                    return `
+                        <div class="container-padding max-w-7xl mx-auto">
+                            <h2 class="text-3xl font-bold text-gray-900 mb-6">Catálogo de Servicios</h2>
+
+                            <!-- Barrea de Búsqueda y Filtros -->
+                            <div class="bg-white p-6 rounded-xl shadow-md mb-8 border border-gray-100">
+                                <h3 class="text-xl font-bold text-gray-800 mb-4">Filtros Avanzados (Visitante/Cliente)</h3>
+
+                                <div class="flex flex-col md:flex-row gap-4">
+                                    <div class="flex-grow">
+                                        <input type="text" id="serviceSearch" placeholder="Buscar por nombre, experto o descripción..." 
+                                            oninput="AppState.applyFilters({ query: this.value })"
+                                            value="${filters.query}"
+                                            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                                    </div>
+
+                                    <select id="modalityFilter" onchange="AppState.applyFilters({ modality: this.value })"
+                                            class="w-full md:w-auto px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                                        <option value="all" ${filters.modality === 'all' ? 'selected' : ''}>Modalidad (Todas)</option>
+                                        <option value="Online" ${filters.modality === 'Online' ? 'selected' : ''}>Online</option>
+                                        <option value="Presencial" ${filters.modality === 'Presencial' ? 'selected' : ''}>Presencial</option>
+                                    </select>
+                                    
+                                    <div class="w-full md:w-40">
+                                        <label for="priceRange" class="block text-sm font-medium text-gray-700">Precio Máx: $${filters.maxPrice}</label>
+                                        <input type="range" id="priceRange" min="10" max="300" step="10" value="${filters.maxPrice}"
+                                               oninput="AppState.applyFilters({ maxPrice: this.value })"
+                                               class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Fin Filtros -->
+
+                            ${filteredServices.length === 0 ? `<p class="text-center text-gray-500 mt-12">No se encontraron servicios que coincidan con los filtros.</p>` : ''}
+                            <div class="grid grid-cols-1 gap-6">
+                                ${serviceList}
+                            </div>
+                        </div>
+                    `;
+                }
+            },
+            
+            BookingDetail: {
+                render: () => {
+                    const state = AppState.get();
+                    const service = AppState.getServiceById(state.selectedServiceId);
+
+                    if (!service) {
+                        return window.Router.switchView('services');
+                    }
+                    
+                    const slots = AppState.getAvailableSlots(service.id);
+                    
+                    const slotsHtml = slots.map(slot => `
+                        <button onclick="Views.BookingDetail.selectSlot('${service.id}', '${slot.date} ${slot.time}')"
+                                class="px-4 py-2 m-1 rounded-lg text-sm font-medium 
+                                        ${slot.isBooked ? 'bg-red-200 text-red-800 cursor-not-allowed' : 'bg-blue-100 text-blue-800 hover:bg-blue-200'}">
+                            ${slot.time} (${slot.capacity} cupos)
+                        </button>
+                    `).join('');
+
+                    return `
+                        <div class="container-padding max-w-4xl mx-auto">
+                            <h2 class="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Reserva: ${service.name}</h2>
+                            <div class="bg-white p-6 rounded-xl shadow-2xl border border-gray-100">
+                                <p class="text-lg font-semibold mb-4">${service.desc}</p>
+                                <p class="text-xl font-extrabold text-blue-700 mb-6">Precio: $${service.price.toFixed(2)} | Duración: ${service.duration} min | Cupo: ${service.capacity}</p>
+                                <p class="text-sm text-gray-500 mb-6">Experto: <span class="font-semibold">${service.expertName}</span> | Reseñas: 4.5/5.0 (Simulado)</p>
+
+                                <div class="mb-8">
+                                    <h3 class="text-xl font-bold text-gray-800 mb-3">1. Selección de Horario (Slot de ${service.duration} min)</h3>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Fecha (Simulado: Hoy)</label>
+                                    <input type="date" value="${new Date().toISOString().split('T')[0]}" disabled class="px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 mb-4">
+                                    
+                                    <div class="flex flex-wrap border border-gray-200 p-4 rounded-lg bg-gray-50">
+                                        ${slotsHtml.length > 0 ? slotsHtml : '<p class="text-red-500">No hay horarios disponibles para hoy.</p>'}
+                                    </div>
+                                </div>
+
+                                <div class="mb-8 p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+                                    <h3 class="text-xl font-bold text-gray-800 mb-3">2. Cálculo y Pago</h3>
+                                    
+                                    <div class="mb-4 text-sm text-gray-600">
+                                        <p>Precio Base: $${service.price.toFixed(2)}</p>
+                                        <p>Impuestos (15%): $${(service.price * 0.15).toFixed(2)}</p>
+                                        <p class="font-bold text-lg text-red-600 border-t pt-1">Total (simulado): $${(service.price * 1.15).toFixed(2)}</p>
+                                    </div>
+
+                                    <div id="paymentMethods" class="space-y-3">
+                                        <label class="flex items-center text-gray-700">
+                                            <input type="radio" name="payment" value="Online" checked class="form-radio text-blue-600">
+                                            <span class="ml-2 font-medium">Pago en línea (Tarjeta/Transferencia)</span>
+                                        </label>
+                                        <label class="flex items-center text-gray-700">
+                                            <input type="radio" name="payment" value="Pagar en Sitio" class="form-radio text-blue-600">
+                                            <span class="ml-2 font-medium">Pagar en sitio (Contraentrega)</span>
+                                        </label>
+                                        ${state.isLoggedIn ? `
+                                            <label class="flex items-center text-gray-700">
+                                                <input type="radio" name="payment" value="Tarjeta Guardada" class="form-radio text-blue-600">
+                                                <span class="ml-2 font-medium">Tarjeta Guardada (**** 4567 - Tokenizada)</span>
+                                            </label>
+                                        ` : ''}
+                                    </div>
+                                </div>
+                                
+                                <button onclick="window.Router.switchView('services')" class="mt-4 text-blue-600 border border-blue-600 py-3 rounded-lg font-semibold hover:bg-blue-50 transition duration-200 w-full">
+                                    Volver al Catálogo
+                                </button>
+
+                                <p id="slotMessage" class="mt-4 text-center text-lg font-bold text-red-500">
+                                    Por favor, selecciona un horario disponible.
+                                </p>
+                            </div>
+                        </div>
+                    `;
+                },
+                selectSlot: (serviceId, slotTime) => {
+                    if (!AppState.get().isLoggedIn) {
+                        window.Router.showAlert('Acción Requerida', 'Debes iniciar sesión para reservar.', 'error');
+                        return window.Router.switchView('login');
+                    }
+
+                    const service = AppState.getServiceById(serviceId);
+                    const slotEndTime = new Date(slotTime);
+                    slotEndTime.setMinutes(slotEndTime.getMinutes() + service.duration);
+                    
+                    const endTimeString = slotEndTime.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+
+                    const paymentMethod = document.querySelector('input[name="payment"]:checked')?.value;
+                    
+                    const slotMsgElement = document.getElementById('slotMessage');
+                    
+                    slotMsgElement.outerHTML = `
+                        <div class="mt-6">
+                            <p class="text-center text-lg font-semibold text-gray-700 mb-4">
+                                Reserva confirmada para: <span class="text-green-600">${slotTime.split(' ')[1]}</span> 
+                                (Termina aprox. ${endTimeString})
+                            </p>
+                            <button onclick="AppState.bookSlot('${serviceId}', '${slotTime}', '${paymentMethod}')" 
+                                class="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition duration-200 shadow-md">
+                                Confirmar Reserva y Pagar (${paymentMethod})
+                            </button>
+                        </div>
+                    `;
+                    
+                    window.Router.showAlert('Horario Seleccionado', `Listo para confirmar.`, 'info');
+                }
+            },
+            
+            Reservations: {
+                render: () => {
+                    const state = AppState.get();
+                    const isManager = state.isAdmin || state.isProvider;
+                    // Mapeamos las reservas reales del estado
+                    const reservationsArray = Object.values(state.reservations);
+                        
+                    
+                    const reservationsHtml = reservationsArray.map(res => {
+                        const starRating = res.rating ? '★'.repeat(res.rating) + '☆'.repeat(5 - res.rating) : 'Sin calificar';
+                        
+                        let statusColor = 'text-gray-600';
+                        if (res.paymentStatus === 'APROBADO') statusColor = 'text-green-600';
+                        else if (res.paymentStatus === 'PENDIENTE') statusColor = 'text-yellow-600';
+                        else if (res.paymentStatus === 'CANCELADO' || res.paymentStatus.includes('REEMBOLSADO') || res.paymentStatus === 'FALLIDO') statusColor = 'text-red-600';
+
+                        const ratingButtons = (state.isLoggedIn && !state.isAdmin && !state.isProvider && !res.rating && res.status === 'APROBADO') ? `
+                            <div class="flex space-x-1 mt-2">
+                                ${[1, 2, 3, 4, 5].map(star => `
+                                    <button onclick="AppState.rateReservation('${res.id}', ${star})" class="text-xs px-2 py-1 bg-yellow-100 text-yellow-800 rounded hover:bg-yellow-200">
+                                        ${star} ★
+                                    </button>
+                                `).join('')}
+                            </div>
+                        ` : '';
+
+                        return `
+                            <div class="flex justify-between items-start bg-gray-50 p-4 rounded-lg border border-gray-200 mb-3">
+                                <div class="space-y-1">
+                                    <p class="font-bold text-lg text-blue-700">${res.serviceName}</p>
+                                    <p class="text-sm text-gray-700">Horario: <span class="font-semibold">${res.slotTime}</span></p>
+                                    <p class="text-sm text-gray-700">Estado Reserva: <span class="font-semibold text-yellow-600">${res.status}</span></p>
+                                    <p class="text-sm text-gray-700">Estado Pago: <span class="font-semibold ${statusColor}">${res.paymentStatus}</span></p>
+                                    <p class="text-sm text-gray-700">Calificación: <span class="text-yellow-500">${starRating}</span></p>
+                                    ${state.isAdmin || state.isProvider ? `<p class="text-xs text-gray-500">Cliente: ${res.username || 'N/A'} (ID: ${res.userId || 'N/A'})</p>` : ''}
+                                    ${ratingButtons}
+                                </div>
+                                
+                                <div class="flex flex-col space-y-2">
+                                    ${state.isLoggedIn && !state.isAdmin && !state.isProvider && res.status !== 'CANCELADO' ? `
+                                        <button onclick="AppState.cancelReservation('${res.id}')" class="bg-red-500 text-white text-sm p-2 rounded-lg hover:bg-red-600 transition duration-150">
+                                            Cancelar
+                                        </button>
+                                    ` : ''}
+
+                                    ${state.isAdmin || state.isProvider ? `
+                                        <button onclick="window.Router.showAlert('Agenda', 'Gestión de status de reserva/pago: ${res.paymentStatus}.', 'info')" class="bg-blue-500 text-white text-sm p-2 rounded-lg hover:bg-blue-600 transition duration-150">
+                                            Gestionar
+                                        </button>
+                                        ${res.status !== 'CANCELADO' ? ` 
+                                            <button onclick="AppState.cancelReservation('${res.id}')" class="bg-red-700 text-white text-sm p-2 rounded-lg hover:bg-red-800 transition duration-150">
+                                                Eliminar Cita
+                                            </button>
+                                        ` : ''}
+                                    ` : ''}
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+
+                    return `
+                        <div class="container-padding max-w-4xl mx-auto">
+                            <h2 class="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">${isManager ? 'Agenda y Reservas' : 'Mis Reservas'} (${reservationsArray.length})</h2>
+                            <p class="text-sm text-gray-500 mb-4">
+                                ${isManager ? 'Visualizando **TODAS** las reservas del sistema. (Falta filtrar por proveedorID).' : 'Eres Cliente: Aquí puedes cancelar y calificar tus servicios.'}
+                            </p>
+                            <div class="bg-white p-6 rounded-xl shadow-2xl border border-gray-100">
+                                ${reservationsArray.length > 0 ? reservationsHtml : '<p class="text-center text-gray-500 py-8">No hay reservas activas en el sistema.</p>'}
+                            </div>
+                            <button onclick="window.Router.switchView('services')" class="mt-6 w-full text-blue-600 border border-blue-600 py-3 rounded-lg font-semibold hover:bg-blue-50 transition duration-200">
+                                Volver a Servicios
+                            </button>
+                        </div>
+                    `;
+                }
+            },
+            
+            PaymentHistory: {
+                render: () => {
+                    const state = AppState.get();
+                    if (state.isAdmin || state.isProvider) {
+                         // El administrador y proveedor no tienen esta vista, ya que no son 'clientes'
+                         return Views.AdminPanel.renderDenied();
+                    }
+
+                    // Obtenemos los pagos de las reservas cargadas (Ahora solo ve sus propios pagos)
+                    const clientPayments = Object.values(state.reservations)
+                                                .filter(res => res.paymentStatus) 
+                                                .map(res => ({
+                                                    id: res.id,
+                                                    date: res.slotTime.split(' ')[0],
+                                                    service: res.serviceName,
+                                                    amount: '11.50', // Monto simulado para la vista, ya que el historial de DB no incluye el monto
+                                                    status: res.paymentStatus,
+                                                    method: res.paymentMethod
+                                                }));
+
+                    const transactionsHtml = clientPayments.map(t => {
+                        let statusClass = 'text-gray-600';
+                        if (t.status === 'APROBADO') statusClass = 'text-green-600';
+                        else if (t.status.includes('PENDIENTE')) statusClass = 'text-yellow-600';
+                        else if (t.status.includes('REEMBOLSADO') || t.status === 'FALLIDO') statusClass = 'text-red-600';
+                        
+                        return `
+                            <div class="flex justify-between items-center py-3 border-b border-gray-100">
+                                <div class="space-y-1">
+                                    <p class="font-semibold text-gray-800">${t.service}</p>
+                                    <p class="text-xs text-gray-500">Reserva ID: ${t.id} - ${t.date}</p>
+                                </div>
+                                <div class="text-right">
+                                    <p class="font-bold ${statusClass}">$${t.amount} (Simulado)</p>
+                                    <p class="text-xs text-gray-500">${t.method} (${t.status})</p>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+
+                    return `
+                        <div class="container-padding max-w-4xl mx-auto">
+                            <h2 class="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Historial de Pagos (Cliente)</h2>
+                            <p class="text-sm text-gray-500 mb-6">Detalle de tus transacciones asociadas a tus reservas.</p>
+                            <div class="bg-white p-6 rounded-xl shadow-2xl border border-gray-100">
+                                ${transactionsHtml.length > 0 ? transactionsHtml : '<p class="text-center text-gray-500 py-8">No hay pagos registrados asociados a tus reservas.</p>'}
+                            </div>
+                            <button onclick="window.Router.switchView('reservations')" class="mt-6 w-full text-blue-600 border border-blue-600 py-3 rounded-lg font-semibold hover:bg-blue-50 transition duration-200">
+                                Volver a Mis Reservas
+                            </button>
+                        </div>
+                    `;
+                }
+            },
+            
+            ProviderSchedule: { /* ... Contenido anterior ... */
+                render: () => {
+                    const state = AppState.get();
+                    const currentProviderId = state.userId;
+                    const schedule = state.providerSchedule[currentProviderId] || {};
+                    const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+
+                    const scheduleHtml = days.map(day => {
+                        const dayData = schedule[day] || { start: '09:00', end: '17:00', capacity: 1 };
+                        
+                        return `
+                            <div class="flex items-center space-x-3 mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                                <label class="w-24 font-semibold text-gray-800 capitalize">${day}</label>
+                                
+                                <div class="flex space-x-2">
+                                    <input type="time" id="start-${day}" value="${dayData.start}" class="px-2 py-1 border rounded-lg w-28">
+                                    <span class="text-gray-500">a</span>
+                                    <input type="time" id="end-${day}" value="${dayData.end}" class="px-2 py-1 border rounded-lg w-28">
+                                </div>
+
+                                <div class="flex items-center space-x-2">
+                                    <label class="text-sm text-gray-600">Cupos:</label>
+                                    <input type="number" id="capacity-${day}" value="${dayData.capacity}" min="1" max="10" class="px-2 py-1 border rounded-lg w-16 text-center">
+                                </div>
+                                
+                                <button onclick="AppState.updateProviderSchedule(
+                                    '${day}', 
+                                    document.getElementById('start-${day}').value, 
+                                    document.getElementById('end-${day}').value,
+                                    document.getElementById('capacity-${day}').value
+                                )" class="bg-blue-600 text-white text-sm px-3 py-1 rounded-lg hover:bg-blue-700 transition">
+                                    Guardar
+                                </button>
+                            </div>
+                        `;
+                    }).join('');
+
+                    return `
+                        <div class="container-padding max-w-7xl mx-auto">
+                            <h2 class="text-3xl font-bold text-gray-900 mb-8">Gestión de Horarios y Agenda</h2>
+                            ${Views.ProviderPanel.renderTabs('schedule')}
+
+                            <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-100">
+                                <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Definir Disponibilidad Semanal (Zona Horaria Local)</h3>
+                                <p class="text-sm text-gray-600 mb-6">Establece el rango de horas en que tus servicios pueden ser reservados y el cupo máximo por franja horaria.</p>
+
+                                <div>
+                                    ${scheduleHtml}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+            },
+
+            ProviderPanel: { /* ... Contenido anterior ... */
+                renderTabs: (activeTab) => {
+                    return `
+                        <div class="flex border-b mb-6">
+                            <button onclick="window.Router.switchView('reservations')" class="py-2 px-4 text-sm font-medium text-gray-600 hover:text-blue-600 border-b-2 ${activeTab === 'reservations' ? 'border-blue-600' : 'border-transparent hover:border-blue-600'} transition duration-150">
+                                Agenda y Reservas
+                            </button>
+                            <button onclick="window.Router.switchView('provider_panel')" class="py-2 px-4 text-sm font-medium text-gray-600 hover:text-blue-600 border-b-2 ${activeTab === 'catalog' ? 'border-blue-600' : 'border-transparent hover:border-blue-600'} transition duration-150">
+                                Catálogo y Precios
+                            </button>
+                            <button onclick="window.Router.switchView('provider_schedule')" class="py-2 px-4 text-sm font-medium text-gray-600 hover:text-blue-600 border-b-2 ${activeTab === 'schedule' ? 'border-blue-600' : 'border-transparent hover:border-blue-600'} transition duration-150">
+                                Horarios y Políticas
+                            </button>
+                        </div>
+                    `;
+                },
+                render: () => {
+                    const state = AppState.get();
+
+                    if (!state.isProvider) {
+                         return Views.AdminPanel.renderDenied(); 
+                    }
+                    
+                    const adminTabs = Views.ProviderPanel.renderTabs('catalog');
+
+                    const providerServices = state.services.filter(s => s.providerId === state.userId);
+
+                    // Formulario para añadir servicio con campos extra
+                    const addForm = `
+                        <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-100 mb-8">
+                            <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Crear/Editar Servicio</h3>
+                            <form id="addServiceForm" onsubmit="event.preventDefault(); 
+                                AppState.addService(
+                                    document.getElementById('newServiceName').value,
+                                    document.getElementById('newServicePrice').value,
+                                    document.getElementById('newServiceDuration').value,
+                                    document.getElementById('newServiceCapacity').value,
+                                    document.getElementById('newServiceModality').value,
+                                    document.getElementById('newServiceExpertName').value, // CAMBIO: Nuevo campo
+                                    document.getElementById('newServiceDesc').value,
+                                    document.getElementById('newServiceImage').value
+                                );
+                                this.reset();
+                            ">
+                                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                                    <div class="md:col-span-2">
+                                        <label for="newServiceName" class="block text-sm font-medium text-gray-700">Nombre del Servicio</label>
+                                        <input type="text" id="newServiceName" placeholder="Consulta/Corte/Sesión" required class="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg">
+                                    </div>
+                                    <div>
+                                        <label for="newServicePrice" class="block text-sm font-medium text-gray-700">Precio ($)</label>
+                                        <input type="number" id="newServicePrice" step="0.01" placeholder="99.99" required class="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg">
+                                    </div>
+                                    <div>
+                                        <label for="newServiceDuration" class="block text-sm font-medium text-gray-700">Duración (min)</label>
+                                        <input type="number" id="newServiceDuration" placeholder="60" required class="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg">
+                                    </div>
+                                    
+                                    <!-- Campos Capacidad y Modalidad -->
+                                    <div>
+                                        <label for="newServiceCapacity" class="block text-sm font-medium text-gray-700">Capacidad (Cupos)</label>
+                                        <input type="number" id="newServiceCapacity" placeholder="1" required class="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg">
+                                    </div>
+                                    <div>
+                                        <label for="newServiceModality" class="block text-sm font-medium text-gray-700">Modalidad</label>
+                                        <select id="newServiceModality" required class="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg">
+                                            <option value="Online">Online</option>
+                                            <option value="Presencial">Presencial</option>
+                                        </select>
+                                    </div>
+
+                                    <!-- CAMBIO: Nuevo Campo de Nombre de Experto -->
+                                    <div class="md:col-span-2">
+                                        <label for="newServiceExpertName" class="block text-sm font-medium text-gray-700">Nombre del Profesional</label>
+                                        <input type="text" id="newServiceExpertName" placeholder="Ej: Dr. García" required class="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg">
+                                    </div>
+
+                                    <div class="md:col-span-4">
+                                        <label for="newServiceDesc" class="block text-sm font-medium text-gray-700">Descripción Corta</label>
+                                        <input type="text" id="newServiceDesc" placeholder="Detalle del servicio" required class="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg">
+                                    </div>
+                                </div>
+                                
+                                <div class="mb-6">
+                                    <label for="newServiceImage" class="block text-sm font-medium text-gray-700">URL de la Imagen/Ícono</label>
+                                    <input type="url" id="newServiceImage" placeholder="https://ejemplo.com/foto-servicio.jpg (Opcional)" class="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg">
+                                </div>
+
+                                <button type="submit" class="w-full bg-green-600 text-white py-2 rounded-lg font-semibold hover:bg-green-700 transition">
+                                    Crear Nuevo Servicio
+                                </button>
+                            </form>
+                        </div>
+                    `;
+
+                    // Lista para eliminar servicios
+                    const serviceList = providerServices.map(service => `
+                        <div class="flex justify-between items-center bg-gray-50 p-4 rounded-lg border border-gray-200 mb-3">
+                            <div class="flex items-center space-x-4">
+                                <img src="${service.image}" alt="${service.name}" class="w-10 h-10 rounded object-cover" onerror="this.onerror=null;this.src='https://placehold.co/100x100/3D405B/ffffff?text=S'">
+                                <div>
+                                    <p class="font-semibold text-gray-800">${service.name}</p>
+                                    <p class="text-sm text-gray-500">Experto: ${service.expertName} | Cupos: ${service.capacity} | ${service.modality}</p>
+                                </div>
+                            </div>
+                            <button onclick="AppState.removeService('${service.id}')" class="bg-red-500 text-white p-2 rounded-full hover:bg-red-600 transition duration-150">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                            </button>
+                        </div>
+                    `).join('');
+
+                    return `
+                        <div class="container-padding max-w-7xl mx-auto">
+                            <h2 class="text-3xl font-bold text-gray-900 mb-8">Panel de Proveedor: ${state.username}</h2>
+                            ${adminTabs}
+                            ${addForm}
+                            <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-100">
+                                <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Mis Servicios Publicados (${providerServices.length})</h3>
+                                <div>
+                                    ${serviceList}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+            },
+            
+            AdminPanel: {
+                renderDenied: () => { /* ... Contenido anterior ... */
+                    return `
+                        <div class="container-padding max-w-7xl mx-auto">
+                            <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative" role="alert">
+                                <strong class="font-bold">Acceso Denegado:</strong>
+                                <span class="block sm:inline">No tienes permisos para acceder a este panel.</span>
+                            </div>
+                        </div>
+                     `;
+                },
+                render: () => { /* ... Contenido anterior ... */
+                    const state = AppState.get();
+
+                    if (!state.isAdmin) {
+                         return Views.AdminPanel.renderDenied();
+                    }
+                    
+                    const servicesListAdmin = state.services.map(service => `
+                        <div class="flex justify-between items-center bg-gray-50 p-4 rounded-lg border border-gray-200 mb-3">
+                            <div class="flex items-center space-x-4">
+                                <img src="${service.image}" alt="${service.name}" class="w-10 h-10 rounded object-cover" onerror="this.onerror=null;this.src='https://placehold.co/100x100/3D405B/ffffff?text=S'">
+                                <div>
+                                    <p class="font-semibold text-gray-800">${service.name}</p>
+                                    <p class="text-sm text-gray-500">Experto: ${service.expertName} | Proveedor ID: ${service.providerId}</p>
+                                </div>
+                            </div>
+                            <button onclick="AppState.removeService('${service.id}')" class="bg-red-500 text-white p-2 rounded-full hover:bg-red-600 transition duration-150">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                            </button>
+                        </div>
+                    `).join('');
+
+                    const adminTabs = `
+                        <div class="flex border-b mb-6">
+                            <button onclick="window.Router.switchView('admin')" class="py-2 px-4 text-sm font-medium text-blue-600 border-b-2 border-blue-600 transition duration-150">
+                                Configuración & Catálogo
+                            </button>
+                            <button onclick="window.Router.switchView('user_management')" class="py-2 px-4 text-sm font-medium text-gray-600 hover:text-blue-600 border-b-2 border-transparent hover:border-blue-600 transition duration-150">
+                                Gestión de Usuarios (Panel Detallado)
+                            </button>
+                        </div>
+                    `;
+
+                    return `
+                        <div class="container-padding max-w-7xl mx-auto">
+                            <h2 class="text-3xl font-bold text-gray-900 mb-8">Panel de Administración Global</h2>
+                            ${adminTabs}
+                            
+                            <div class="bg-white p-8 rounded-xl shadow-lg border border-gray-100 mb-8">
+                                <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Gestión de Catálogo Global (${state.services.length} Servicios)</h3>
+                                
+                                <div class="mb-4">
+                                    <button onclick="window.Router.switchView('provider_panel')" class="bg-green-600 text-white py-2 px-4 rounded-lg hover:bg-green-700 transition">
+                                        + Agregar Nuevo Servicio
+                                    </button>
+                                </div>
+
+                                <div class="mt-4">
+                                    ${servicesListAdmin}
+                                </div>
+                            </div>
+                            
+                            <div class="bg-white p-8 rounded-xl shadow-lg border border-gray-100">
+                                <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Configuración de Plataforma</h3>
+                                
+                                <div class="space-y-4">
+                                    <div class="p-4 bg-gray-50 rounded-lg">
+                                        <p class="font-semibold text-gray-700">Pasarelas de Pago</p>
+                                        <p class="text-sm text-gray-500">Configuración de APIs de Stripe/PayPal (simulado). Estado: Activo.</p>
+                                        <button onclick="window.Router.showAlert('Configuración', 'Parámetros de conexión a pasarela.', 'info')" class="mt-2 text-sm text-blue-600 hover:underline">Configurar</button>
+                                    </div>
+                                    
+                                    <div class="p-4 bg-gray-50 rounded-lg">
+                                        <p class="font-semibold text-gray-700">Impuestos y Cargos</p>
+                                        <p class="text-sm text-gray-500">Impuesto de Venta (IVA): 15% (simulado).</p>
+                                        <button onclick="window.Router.showAlert('Configuración', 'Ajuste de tasas de impuestos.', 'info')" class="mt-2 text-sm text-blue-600 hover:underline">Editar Impuestos</button>
+                                    </div>
+                                    
+                                    <div class="p-4 bg-gray-50 rounded-lg">
+                                        <p class="font-semibold text-gray-700">Plantillas de Notificación</p>
+                                        <p class="text-sm text-gray-500">Email de Confirmación de Pago y Recordatorio SMS.</p>
+                                        <button onclick="window.Router.showAlert('Configuración', 'Editor de plantillas de notificación Email/SMS.', 'info')" class="mt-2 text-sm text-blue-600 hover:underline">Editar Plantillas</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+            },
+            
+            UserManagement: { /* ... Contenido anterior ... */
+                render: () => {
+                    const state = AppState.get();
+                    if (!state.isAdmin) {
+                         return Views.AdminPanel.renderDenied();
+                    }
+
+                    const manageableUsers = state.users.filter(user => user.role !== 'Administrador');
+
+
+                    const adminTabs = `
+                        <div class="flex border-b mb-6">
+                            <button onclick="window.Router.switchView('admin')" class="py-2 px-4 text-sm font-medium text-gray-600 hover:text-blue-600 border-b-2 border-transparent hover:border-blue-600 transition duration-150">
+                                Configuración Global
+                            </button>
+                            <button class="py-2 px-4 text-sm font-medium text-blue-600 border-b-2 border-blue-600 transition duration-150">
+                                Moderación y Usuarios
+                            </button>
+                        </div>
+                    `;
+                    
+                    const userListHtml = manageableUsers.map(user => `
+                        <div class="bg-gray-50 p-4 rounded-lg border border-gray-200 mb-4 shadow-sm">
+                            <div class="flex justify-between items-center">
+                                <p class="font-bold text-lg ${user.role === 'Proveedor' ? 'text-orange-600' : 'text-gray-800'}">${user.name} <span class="text-xs text-gray-500">(${user.role})</span></p>
+                                <p class="text-sm ${user.status === 'Activo' ? 'text-green-600' : 'text-yellow-600'}">${user.status}</p>
+                            </div>
+                            <p class="text-sm text-gray-700">Email: <span class="font-medium">${user.email}</span></p>
+                            <p class="text-sm text-gray-700">ID Usuario: ${user.id}</p>
+
+                            <div class="mt-3 space-y-2 bg-white p-3 rounded-lg">
+                                <h4 class="text-sm font-semibold text-gray-700 mb-2">Edición de Datos (Admin):</h4>
+                                
+                                <div class="grid grid-cols-2 gap-3">
+                                    
+                                    <!-- Nombre -->
+                                    <div class="col-span-1">
+                                        <input type="text" id="edit-name-${user.id}" placeholder="Nombre" value="${user.firstName || ''}" class="w-full px-2 py-1 text-sm border rounded-lg">
+                                        <button onclick="AppState.updateUserProfile('${user.id}', 'firstName', document.getElementById('edit-name-${user.id}').value)" 
+                                                class="bg-blue-100 text-blue-700 text-xs px-2 py-1 rounded-lg hover:bg-blue-200 w-full mt-1">Actualizar Nombre</button>
+                                    </div>
+
+                                    <!-- Apellido -->
+                                    <div class="col-span-1">
+                                        <input type="text" id="edit-lastName-${user.id}" placeholder="Apellido" value="${user.lastName || ''}" class="w-full px-2 py-1 text-sm border rounded-lg">
+                                        <button onclick="AppState.updateUserProfile('${user.id}', 'lastName', document.getElementById('edit-lastName-${user.id}').value)" 
+                                                class="bg-blue-100 text-blue-700 text-xs px-2 py-1 rounded-lg hover:bg-blue-200 w-full mt-1">Actualizar Apellido</button>
+                                    </div>
+                                    
+                                    <!-- ID Identificación -->
+                                    <div class="col-span-2">
+                                        <p class="text-sm text-gray-500">ID Actual: ${user.identificationId || 'N/A'}</p>
+                                        <input type="text" id="edit-id-${user.id}" placeholder="Nueva Identificación" class="w-full px-2 py-1 text-sm border rounded-lg">
+                                        <button onclick="AppState.updateUserProfile('${user.id}', 'identificationId', document.getElementById('edit-id-${user.id}').value)" 
+                                                class="bg-blue-500 text-white text-xs px-2 py-1 rounded-lg hover:bg-blue-600 w-full mt-1">Actualizar ID</button>
+                                    </div>
+
+                                    <!-- Correo Electrónico -->
+                                    <div class="col-span-2">
+                                        <input type="email" id="edit-email-${user.id}" placeholder="Nuevo Correo" class="w-full px-2 py-1 text-sm border rounded-lg">
+                                        <button onclick="AppState.updateUserProfile('${user.id}', 'email', document.getElementById('edit-email-${user.id}').value)" 
+                                                class="bg-blue-500 text-white text-xs px-3 py-1 rounded-lg hover:bg-blue-600 w-full mt-1">Actualizar Correo</button>
+                                    </div>
+
+                                    <!-- Contraseña -->
+                                    <div class="col-span-2">
+                                        <input type="password" id="edit-password-${user.id}" placeholder="Nueva Contraseña (Simulación de Hash)" class="w-full px-2 py-1 text-sm border rounded-lg">
+                                        <button onclick="AppState.updateUserProfile('${user.id}', 'password', document.getElementById('edit-password-${user.id}').value)" 
+                                                class="bg-red-500 text-white text-xs px-3 py-1 rounded-lg hover:bg-red-600 w-full mt-1">Restablecer Contraseña</button>
+                                    </div>
+                                    
+                                </div>
+                            </div>
+                        </div>
+                    `).join('');
+
+                    return `
+                        <div class="container-padding max-w-7xl mx-auto">
+                            <h2 class="text-3xl font-bold text-gray-900 mb-8">Gestión de Usuarios y Proveedores</h2>
+                            ${adminTabs}
+                            
+                            <div class="bg-white p-8 rounded-xl shadow-lg border border-gray-100">
+                                <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Panel de Edición Detallada (${manageableUsers.length} Usuarios)</h3>
+                                <p class="text-sm text-gray-500 mb-6">El administrador tiene control total (CRUD) sobre los datos de perfil de clientes y proveedores. El **Admin Global** ha sido excluido de esta lista.</p>
+                                
+                                <div>
+                                    ${userListHtml}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+            },
+            
+            // Reutilización de vistas de autenticación
+            Login: { render: () => Views.Login.render() },
+            Register: { render: () => Views.Register.render() }
+        };
+
+
+        // --- Implementaciones de las Vistas de Autenticación (con CAMBIOS) ---
+        Views.Login.render = () => { return `
+            <div class="container-padding max-w-md mx-auto">
+                <div class="bg-white p-8 rounded-xl shadow-2xl border border-gray-100">
+                    <h2 class="text-3xl font-bold text-gray-900 mb-6 text-center">Iniciar Sesión</h2>
+                    <!-- CAMBIO 1: Eliminado el texto de prueba -->
+                    <form id="loginForm" onsubmit="event.preventDefault(); AppState.handleLogin(document.getElementById('loginEmail').value, document.getElementById('loginPassword').value);">
+                        <div class="mb-4">
+                            <label for="loginEmail" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                            <input type="email" id="loginEmail" placeholder="tu@email.com" required
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                        </div>
+                        <div class="mb-6">
+                            <label for="loginPassword" class="block text-sm font-medium text-gray-700 mb-1">Contraseña</label>
+                            <!-- Se mantiene el minlength para una experiencia más segura -->
+                            <input type="password" id="loginPassword" placeholder="••••••••" required minlength="8"
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                        </div>
+                        <button type="submit"
+                            class="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition duration-200 shadow-md">
+                            Entrar
+                        </button>
+                    </form>
+                    <p class="mt-6 text-center text-sm text-gray-600">
+                        ¿No tienes cuenta?
+                        <button onclick="window.Router.switchView('register')" class="text-blue-600 font-semibold hover:text-blue-700">Regístrate aquí</button>
+                    </p>
+                </div>
+            </div>
+        `; };
+        
+        Views.Register.render = () => { return `
+            <div class="container-padding max-w-md mx-auto">
+                <div class="bg-white p-8 rounded-xl shadow-2xl border border-gray-100">
+                    <h2 class="text-3xl font-bold text-gray-900 mb-6 text-center">Registrarse (Cliente)</h2>
+                    <!-- CAMBIO 2: Mensaje de requisitos de contraseña -->
+                    <p class="text-sm text-red-600 mb-4 bg-red-50 p-2 rounded-lg border border-red-200">
+                        Contraseña requiere 8 caracteres, 1 mayúscula, 1 minúscula, 1 número y 1 carácter especial (@#$&).
+                    </p>
+                    <form id="registerForm" onsubmit="event.preventDefault(); AppState.handleRegister(
+                            document.getElementById('registerEmail').value, 
+                            document.getElementById('registerPassword').value,
+                            document.getElementById('registerName').value,
+                            document.getElementById('registerLastName').value,
+                            document.getElementById('registerID').value,
+                            document.getElementById('registerConfirmPassword').value
+                        );">
+                        
+                        <div class="mb-4">
+                            <label for="registerName" class="block text-sm font-medium text-gray-700 mb-1">Nombre</label>
+                            <input type="text" id="registerName" placeholder="Tu nombre" required
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                        </div>
+
+                        <div class="mb-4">
+                            <label for="registerLastName" class="block text-sm font-medium text-gray-700 mb-1">Apellido</label>
+                            <input type="text" id="registerLastName" placeholder="Tu apellido" required
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                        </div>
+
+                        <div class="mb-4">
+                            <label for="registerID" class="block text-sm font-medium text-gray-700 mb-1">ID (Identificación)</label>
+                            <input type="text" id="registerID" placeholder="Tu número de identificación" required
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                        </div>
+
+                        <div class="mb-4">
+                            <label for="registerEmail" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                            <input type="email" id="registerEmail" placeholder="tu@email.com" required
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                        </div>
+                        
+                        <div class="mb-4">
+                            <label for="registerPassword" class="block text-sm font-medium text-gray-700 mb-1">Contraseña</label>
+                            <!-- Se mantiene el minlength para una experiencia más segura -->
+                            <input type="password" id="registerPassword" placeholder="Mínimo 8 caracteres (Seguridad)" required minlength="8"
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                        </div>
+
+                        <div class="mb-6">
+                            <label for="registerConfirmPassword" class="block text-sm font-medium text-gray-700 mb-1">Confirmar Contraseña</label>
+                            <!-- Se mantiene el minlength para una experiencia más segura -->
+                            <input type="password" id="registerConfirmPassword" placeholder="Repetir contraseña" required minlength="8"
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                        </div>
+
+                        <button type="submit"
+                            class="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition duration-200 shadow-md">
+                            Crear Cuenta
+                        </button>
+                    </form>
+                    <p class="mt-6 text-center text-sm text-gray-600">
+                        ¿Ya tienes una cuenta?
+                        <button onclick="window.Router.switchView('login')" class="text-blue-600 font-semibold hover:text-blue-700">Inicia Sesión</button>
+                    </p>
+                </div>
+            </div>
+        `; };
+
+
+        // ==========================================================
+        // RENDERIZADOR GLOBAL (SINGLETON)
+        // ==========================================================
+        
+        window.Router = (function() {
+            // Mapping de vistas para el OCP
+            const routes = {
+                'services': Views.Services, 
+                'login': Views.Login,
+                'register': Views.Register,
+                'reservations': Views.Reservations,
+                'admin': Views.AdminPanel,
+                'provider_panel': Views.ProviderPanel, 
+                'booking_detail': Views.BookingDetail,
+                'user_management': Views.UserManagement, 
+                'payment_history': Views.PaymentHistory, 
+                'provider_schedule': Views.ProviderSchedule, 
+            };
+
+            const switchView = (viewName, params = {}) => {
+                const state = AppState.get();
+                
+                if (viewName === 'booking_detail' && params.serviceId) {
+                    AppState.get().selectedServiceId = params.serviceId;
+                } else if (viewName !== 'booking_detail') {
+                    AppState.get().selectedServiceId = null;
+                }
+
+                // Restricción de acceso para Administrador
+                if ((viewName === 'admin' || viewName === 'user_management') && !state.isAdmin) {
+                    showAlert('Acceso Restringido', 'Solo el Administrador Global puede ver este panel.', 'error');
+                    viewName = 'services';
+                }
+                
+                // Restricción de acceso para Proveedor
+                if ((viewName === 'provider_panel' || viewName === 'provider_schedule') && !state.isProvider) {
+                    showAlert('Acceso Restringido', 'Solo los Proveedores pueden acceder a la gestión de servicios.', 'error');
+                    viewName = 'services';
+                }
+
+
+                if (routes[viewName]) {
+                    AppState.get().currentView = viewName; 
+                    render();
+                } else {
+                    showAlert('Error de Ruta', `La vista '${viewName}' no existe.`, 'error');
+                }
+            };
+
+            const showAlert = (title, message, type = 'info') => {
+                const modalElement = document.getElementById('customModal');
+                if (!modalElement) return;
+
+                const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ️';
+                const color = type === 'success' ? 'bg-green-500' : type === 'error' ? 'bg-red-500' : 'bg-blue-500';
+
+                modalElement.querySelector('.modal-icon').textContent = icon;
+                modalElement.querySelector('.modal-title').textContent = title;
+                modalElement.querySelector('.modal-message').textContent = message;
+                modalElement.querySelector('.modal-header').className = `modal-header p-4 ${color} text-white rounded-t-xl`;
+                
+                modalElement.classList.remove('hidden');
+
+                setTimeout(() => {
+                    modalElement.classList.add('hidden');
+                }, 3000);
+            };
+
+            /** Renderiza el header de la aplicación. */
+            function renderHeader() {
+                const state = AppState.get();
+                const totalReservations = Object.keys(state.reservations).length;
+                
+                // CORRECCIÓN: El indicador rojo ahora solo se muestra si el usuario está logueado Y tiene reservas.
+                const reservationIndicator = (state.isLoggedIn && totalReservations > 0) ? `<span class="absolute -top-1 -right-1 inline-flex items-center justify-center px-2 py-1 text-xs font-bold leading-none text-red-100 transform translate-x-1/2 -translate-y-1/2 bg-red-600 rounded-full">${totalReservations}</span>` : '';
+
+                let rightContent;
+
+                if (state.isLoggedIn) {
+                    rightContent = `
+                        <div class="relative inline-block text-left group">
+                            <button type="button" class="dropdown-button inline-flex justify-center items-center rounded-full border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                                ${state.username}
+                            </button>
+                            <div class="dropdown-menu origin-top-right absolute right-0 mt-2 w-56 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-20 transition duration-150">
+                                <div class="py-1" role="menu" aria-orientation="vertical" aria-labelledby="options-menu">
+                                    <a href="#" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" onclick="window.Router.switchView('services')">
+                                        <span class="font-bold">${state.username}</span> (ID: ${state.userId || 'Invitado'})
+                                    </a>
+                                    
+                                    ${state.isAdmin ? `
+                                        <div class="border-t border-gray-100 my-1"></div>
+                                        <a href="#" class="relative flex items-center px-4 py-2 text-sm text-purple-700 font-semibold hover:bg-purple-50" onclick="window.Router.switchView('admin')">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2"><path d="M22 10V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v4"/><path d="M22 14v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4"/><path d="M13 14h-2"/><path d="M7 10h.01"/><path d="M7 14h.01"/><path d="M17 10h.01"/><path d="M17 14h.01"/></svg>
+                                            Panel Administrador
+                                        </a>
+                                    ` : ''}
+
+                                    ${state.isProvider ? `
+                                        <div class="border-t border-gray-100 my-1"></div>
+                                        <a href="#" class="relative flex items-center px-4 py-2 text-sm text-orange-700 font-semibold hover:bg-orange-50" onclick="window.Router.switchView('provider_panel')">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                                            Panel Proveedor
+                                        </a>
+                                    ` : ''}
+
+
+                                    <div class="border-t border-gray-100 my-1"></div>
+                                    <a href="#" class="relative flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" onclick="window.Router.switchView('reservations')">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                                        Ver Agenda/Reservas
+                                        ${reservationIndicator}
+                                    </a>
+                                    <a href="#" class="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" onclick="window.Router.switchView('payment_history')">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+                                        Historial de Pagos
+                                    </a>
+                                    <a href="#" class="flex items-center px-4 py-2 text-sm text-red-600 hover:bg-red-50" onclick="AppState.handleLogout()">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                                        Cerrar Sesión
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    rightContent = `
+                        <button onclick="window.Router.switchView('login')"
+                            class="px-4 py-2 text-sm font-medium text-blue-600 bg-white border border-blue-600 rounded-lg hover:bg-blue-50 transition duration-150 active:scale-95 shadow-md">
+                            Iniciar Sesión
+                        </button>
+                        <button onclick="window.Router.switchView('register')"
+                            class="ml-3 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition duration-150 active:scale-95 shadow-md">
+                            Registrarse
+                        </button>
+                    `;
+                }
+
+                return `
+                    <header class="bg-white shadow-md sticky top-0 z-10">
+                        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex justify-between items-center">
+                            <div class="flex items-center">
+                                <button onclick="window.Router.switchView('services')" class="text-2xl font-extrabold text-blue-700 hover:text-blue-800 transition duration-150 focus:outline-none">
+                                    AgendaPro
+                                </button>
+                            </div>
+                            <div class="flex items-center space-x-3">
+                                ${rightContent}
+                            </div>
+                        </div>
+                    </header>
+                `;
+            }
+
+            return {
+                switchView,
+                showAlert,
+                renderHeader,
+                routes
+            };
+        })();
+
+
+        // ==========================================================
+        // RENDERIZADOR GLOBAL (SINGLETON)
+        // ==========================================================
+        
+        window.render = function() {
+            const app = document.getElementById('app');
+            const state = AppState.get();
+            const currentViewModule = window.Router.routes[state.currentView];
+            let content = '';
+
+            if (currentViewModule) {
+                content = currentViewModule.render();
+            } else {
+                content = `<div class="container-padding max-w-7xl mx-auto"><p class="text-red-500">Error: No se encontró el módulo de vista para '${state.currentView}'</p></div>`;
+            }
+            
+            app.innerHTML = `
+                ${window.Router.renderHeader()}
+                <main class="pb-16 pt-8">
+                    ${content}
+                </main>
+                <!-- Modal de Alerta Personalizado -->
+                <div id="customModal" class="hidden fixed top-4 right-4 z-50 transition-opacity duration-300 opacity-100">
+                    <div class="bg-white rounded-xl shadow-2xl overflow-hidden max-w-xs w-full">
+                        <div class="modal-header p-4 bg-blue-500 text-white rounded-t-xl flex items-center">
+                            <span class="modal-icon text-xl mr-2">ℹ️</span>
+                            <h3 class="modal-title font-bold">Mensaje</h3>
+                        </div>
+                        <div class="p-4">
+                            <p class="modal-message text-sm text-gray-700">Contenido del mensaje.</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // 1. Inyectar el callback de renderizado en el AppState
+        AppState.setRenderCallback(window.render);
+
+        // 2. Iniciar la aplicación al cargar la página
+        window.onload = function() {
+            window.render();
+            AppState.fetchInitialData();
+        }
+
+    </script>
+</body>
+</html>
