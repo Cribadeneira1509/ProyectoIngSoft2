@@ -1,4 +1,5 @@
 # ProyectoIngSoft2
+Todo el proyecto puede encontrarlo en la rama de features.
 
 Descripción General del Sistema
 
