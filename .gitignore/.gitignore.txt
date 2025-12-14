@@ -1,0 +1,110 @@
+Entorno Virtual de Python
+
+venv/
+pycache/
+*.pyc
+
+Archivos de Bases de Datos
+
+*.sqlite
+*.db
+
+Archivos de configuración local (nunca deben subirse)
+
+configuracion_db.py
+
+Servicios Mínimos Funcionales (Microservicios)
+
+El PoC actual está implementado de forma monolítica para facilitar el desarrollo inicial. Sin embargo, su estructura de clases en \texttt{logica.py} permite una división limpia en tres microservicios basados en dominios de negocio.
+
+1. Gateway y Orquestador (API Gateway)
+
+Este componente se mantiene en el servidor principal Flask (\texttt{server.py}).
+
+Módulo
+
+Descripción
+
+Rol de Arquitectura
+
+\texttt{server.py}
+
+Gestiona todos los endpoints (\texttt{/api/*}), autenticación de tokens JWT y la orquestación de flujos transaccionales (Patrón Mediator).
+
+API Gateway y Orquestador de Servicios
+
+2. Microservicio de Catálogo y Usuarios
+
+Este servicio gestiona todas las entidades estáticas y la identidad.
+
+Clase de Lógica
+
+Entidades
+
+Responsabilidades
+
+\texttt{Usuario}
+
+\texttt{usuarios}
+
+Registro, Login y Gestión de Roles.
+
+\texttt{Login}
+
+\texttt{usuarios}
+
+Autenticación de credenciales.
+
+\texttt{Servicio}
+
+\texttt{servicios}
+
+CRUD de servicios y consulta del catálogo (\texttt{GET /services}).
+
+\texttt{HistorialReservas}
+
+Múltiples tablas
+
+Lectura consolidada de reportes.
+
+3. Microservicio de Transacciones y Flujos de Reserva (Critical Path)
+
+Este servicio maneja el flujo de estado de las citas y las finanzas.
+
+Clase de Lógica
+
+Entidades
+
+Responsabilidades
+
+\texttt{Reserva}
+
+\texttt{reservas}
+
+Creación de citas, validación de slots (future).
+
+\texttt{Pago}
+
+\texttt{pagos}
+
+Procesamiento de pagos, registro de transacciones.
+
+\texttt{send_email_notification}
+
+Ninguna
+
+\textit{Output} asíncrono (debe ser un worker externo).
+
+4. Diagrama de Flujo (Microservicios Propuestos)
+
+Un flujo de reserva en la arquitectura propuesta se vería así:
+
+\textbf{Frontend} envía \texttt{POST /api/reservation} al API Gateway.
+
+API Gateway (\texttt{server.py}) llama al Microservicio de Transacciones (\texttt{Reserva.crear()}).
+
+API Gateway llama al Microservicio de Transacciones (\texttt{Pago.procesar()}).
+
+Si ambos tienen éxito, el API Gateway devuelve la confirmación al cliente y emite un evento al \textbf{Worker de Notificaciones}.
+
+\textbf{Nota sobre el PoC actual:} Actualmente, todas las clases de lógica residen en \texttt{logica.py} y se accede a la base de datos a través de una función central. El siguiente paso en la evolución sería separar estos módulos en contenedores Docker y que se comuniquen vía HTTP/REST o gRPC.
