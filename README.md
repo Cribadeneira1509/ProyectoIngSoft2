@@ -130,7 +130,7 @@ Abrir en el navegador:
 
 htmlcov/index.html
 
-Cobertura alcanzada: 85.4%
+Cobertura alcanzada: 70.2%
 
 Pruebas de Integración (Caja Negra)
 
